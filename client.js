@@ -9,7 +9,8 @@ const H = canvas.height;
 let ws;
 let myId = null;
 let myPlayer = { x: 0, y: 0 };
-let otherPlayers = []; // { id, x, y }
+let otherPlayers = [];
+let bullets = [];
 
 const keys = {};
 window.addEventListener("keydown", e => keys[e.code] = true);
@@ -17,7 +18,7 @@ window.addEventListener("keyup",   e => keys[e.code] = false);
 
 // Connexion au serveur WebSocket
 function connect() {
-  ws = new WebSocket("ws://localhost:8080");
+  ws = new WebSocket("wss://jeu-multi.onrender.com");
 
   ws.onopen = () => {
     info.textContent = "Connecté. En attente d'un autre joueur...";
@@ -25,17 +26,26 @@ function connect() {
 
   ws.onmessage = evt => {
     const msg = JSON.parse(evt.data);
+
     if (msg.type === "welcome") {
       myId = msg.id;
       myPlayer.x = msg.x;
       myPlayer.y = msg.y;
       info.textContent = "Tu es le joueur " + myId + ". Attends ton ami.";
-    } else if (msg.type === "state") {
+    }
+
+    else if (msg.type === "state") {
       otherPlayers = msg.players.filter(p => p.id !== myId);
       if (msg.players.length === 2) {
         info.textContent = "Deux joueurs connectés. WASD/ZQSD pour bouger.";
       }
-    } else if (msg.type === "full") {
+    }
+
+    else if (msg.type === "bullets") {
+      bullets = msg.bullets;
+    }
+
+    else if (msg.type === "full") {
       info.textContent = "Serveur plein. (2 joueurs max)";
     }
   };
@@ -46,6 +56,27 @@ function connect() {
 }
 
 connect();
+
+// Tir au clic
+window.addEventListener("mousedown", e => {
+  if (!myId) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const dx = mx - myPlayer.x;
+  const dy = my - myPlayer.y;
+  const len = Math.hypot(dx, dy) || 1;
+
+  ws.send(JSON.stringify({
+    type: "shoot",
+    x: myPlayer.x,
+    y: myPlayer.y,
+    dx: dx / len,
+    dy: dy / len
+  }));
+});
 
 // Game loop
 let lastTime = 0;
@@ -62,10 +93,9 @@ requestAnimationFrame(loop);
 function update(dt) {
   if (!myId) return;
 
-  const speed = 150; // pixels/s
+  const speed = 150;
   let dx = 0, dy = 0;
 
-  // ZQSD ou WASD
   if (keys["KeyW"] || keys["KeyZ"] || keys["ArrowUp"])    dy -= 1;
   if (keys["KeyS"] || keys["ArrowDown"])                  dy += 1;
   if (keys["KeyA"] || keys["KeyQ"] || keys["ArrowLeft"])  dx -= 1;
@@ -77,11 +107,19 @@ function update(dt) {
   myPlayer.x += dx * speed * dt;
   myPlayer.y += dy * speed * dt;
 
-  // limites écran
   myPlayer.x = Math.max(0, Math.min(W, myPlayer.x));
   myPlayer.y = Math.max(0, Math.min(H, myPlayer.y));
 
-  // envoi position au serveur
+  // Dash
+  if ((keys["ShiftLeft"] || keys["ShiftRight"]) && (dx !== 0 || dy !== 0)) {
+    ws.send(JSON.stringify({
+      type: "dash",
+      dx,
+      dy
+    }));
+  }
+
+  // Envoi position
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({
       type: "move",
@@ -94,16 +132,14 @@ function update(dt) {
 function render() {
   ctx.clearRect(0, 0, W, H);
 
-  // fond
   ctx.fillStyle = "#161925";
   ctx.fillRect(0, 0, W, H);
 
-  // “arène” simple
   ctx.strokeStyle = "#444";
   ctx.lineWidth = 4;
   ctx.strokeRect(20, 20, W - 40, H - 40);
 
-  // joueur local
+  // Joueur local
   if (myId) {
     ctx.fillStyle = myId === 1 ? "#4caf50" : "#ffb300";
     ctx.beginPath();
@@ -111,7 +147,7 @@ function render() {
     ctx.fill();
   }
 
-  // autre(s) joueur(s)
+  // Autres joueurs
   for (const p of otherPlayers) {
     ctx.fillStyle = p.id === 1 ? "#4caf50" : "#ffb300";
     ctx.beginPath();
@@ -119,8 +155,16 @@ function render() {
     ctx.fill();
   }
 
-  // pseudo HUD
+  // Projectiles
+  ctx.fillStyle = "#ff4444";
+  for (const b of bullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   ctx.fillStyle = "#ccc";
   ctx.font = "14px monospace";
   ctx.fillText("Toi: " + (myId || "?"), 10, 18);
 }
+
