@@ -16,11 +16,21 @@ const keys = {};
 window.addEventListener("keydown", e => keys[e.code] = true);
 window.addEventListener("keyup",   e => keys[e.code] = false);
 
-// Connexion au serveur WebSocket
+// Fire control
+let firing = false;
+let fireInterval = null;
+const FIRE_RATE = 6; // tirs par seconde
+const FIRE_MS = 1000 / FIRE_RATE;
+
+// Dash control (client-side cooldown to avoid spamming)
+let lastDashClient = 0;
+const DASH_COOLDOWN_MS = 1000;
+
 function connect() {
   ws = new WebSocket("wss://jeu-multi.onrender.com");
 
   ws.onopen = () => {
+    console.log("WS ouverte !");
     info.textContent = "Connecté. En attente d'un autre joueur...";
   };
 
@@ -36,9 +46,7 @@ function connect() {
 
     else if (msg.type === "state") {
       otherPlayers = msg.players.filter(p => p.id !== myId);
-      if (msg.players.length === 2) {
-        info.textContent = "Deux joueurs connectés. WASD/ZQSD pour bouger.";
-      }
+      if (msg.players.length === 2) info.textContent = "Deux joueurs connectés. WASD/ZQSD pour bouger.";
     }
 
     else if (msg.type === "bullets") {
@@ -54,29 +62,58 @@ function connect() {
     info.textContent = "Déconnecté du serveur.";
   };
 }
-
 connect();
 
-// Tir au clic
-window.addEventListener("mousedown", e => {
-  if (!myId) return;
+// Tir continu : start/stop interval
+function startFiring() {
+  if (firing || !myId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  firing = true;
+  fireInterval = setInterval(() => {
+    sendShoot();
+  }, FIRE_MS);
+  // tir immédiat
+  sendShoot();
+}
 
-  const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
+function stopFiring() {
+  firing = false;
+  if (fireInterval) {
+    clearInterval(fireInterval);
+    fireInterval = null;
+  }
+}
 
-  const dx = mx - myPlayer.x;
-  const dy = my - myPlayer.y;
+function sendShoot() {
+  if (!myId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  // tir vers la position de la souris stockée
+  if (!lastMouse) return;
+  const dx = lastMouse.x - myPlayer.x;
+  const dy = lastMouse.y - myPlayer.y;
   const len = Math.hypot(dx, dy) || 1;
-
   ws.send(JSON.stringify({
     type: "shoot",
     x: myPlayer.x,
     y: myPlayer.y,
     dx: dx / len,
-    dy: dy / len
+    dy: dy / len,
+    owner: myId
   }));
+}
+
+// souris pour viser
+let lastMouse = null;
+canvas.addEventListener("mousemove", e => {
+  const rect = canvas.getBoundingClientRect();
+  lastMouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 });
+
+// clic maintenu pour tirer
+canvas.addEventListener("mousedown", e => {
+  const rect = canvas.getBoundingClientRect();
+  lastMouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  startFiring();
+});
+window.addEventListener("mouseup", () => stopFiring());
 
 // Game loop
 let lastTime = 0;
@@ -110,22 +147,27 @@ function update(dt) {
   myPlayer.x = Math.max(0, Math.min(W, myPlayer.x));
   myPlayer.y = Math.max(0, Math.min(H, myPlayer.y));
 
-  // Dash
+  // Dash : envoi au serveur avec cooldown client
   if ((keys["ShiftLeft"] || keys["ShiftRight"]) && (dx !== 0 || dy !== 0)) {
-    ws.send(JSON.stringify({
-      type: "dash",
-      dx,
-      dy
-    }));
+    const now = Date.now();
+    if (now - lastDashClient >= DASH_COOLDOWN_MS) {
+      lastDashClient = now;
+      // prédiction locale pour réactivité
+      const dashPower = 80;
+      myPlayer.x += dx * dashPower;
+      myPlayer.y += dy * dashPower;
+      myPlayer.x = Math.max(0, Math.min(W, myPlayer.x));
+      myPlayer.y = Math.max(0, Math.min(H, myPlayer.y));
+      // envoi au serveur
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "dash", dx, dy }));
+      }
+    }
   }
 
-  // Envoi position
+  // Envoi position régulière
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({
-      type: "move",
-      x: myPlayer.x,
-      y: myPlayer.y
-    }));
+    ws.send(JSON.stringify({ type: "move", x: myPlayer.x, y: myPlayer.y }));
   }
 }
 
@@ -167,4 +209,3 @@ function render() {
   ctx.font = "14px monospace";
   ctx.fillText("Toi: " + (myId || "?"), 10, 18);
 }
-
